@@ -35,6 +35,8 @@ SEARCH_URL = (
 )
 HEARTBEAT_HOUR_PT = 10          # daily "still running" message around 10am Pacific
 MAX_PAGES = 5                   # 18 listings per page, so up to 90 listings
+FORGET_AFTER_HOURS = 6          # a listing must be gone this long before its return counts as NEW
+FAILS_BEFORE_ALERT = 2          # failed checks in a row before you get a "broken" alert
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")   # set as a GitHub secret
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
 
@@ -205,11 +207,13 @@ def main():
         current = search()
     except TrackerBroken as e:
         print(f"BROKEN: {e}")
-        if not state.get("broken"):   # alert once, not every 10 minutes
+        state["fail_count"] = state.get("fail_count", 0) + 1
+        # one failed check is usually a hiccup; only alert after 2 in a row, and only once
+        if state["fail_count"] >= FAILS_BEFORE_ALERT and not state.get("broken"):
             notify("Coachella tracker is broken",
                    f"{e}. I'll keep retrying and tell you when it's back.",
                    priority="high", tags="warning")
-        state["broken"] = True
+            state["broken"] = True
         state["broken_reason"] = str(e)
         save_state(state)
         return 0   # exit cleanly so the state gets saved/committed
@@ -217,9 +221,11 @@ def main():
     if state.get("broken"):
         notify("Coachella tracker is working again",
                f"Back online, tracking {len(current)} listings.", tags="white_check_mark")
-        state["broken"] = False
-        state.pop("broken_reason", None)
+    state["broken"] = False
+    state["fail_count"] = 0
+    state.pop("broken_reason", None)
 
+    now_iso = datetime.now(timezone.utc).isoformat(timespec="seconds")
     old = state.get("listings", {})
 
     if not state.get("started"):
@@ -252,8 +258,20 @@ def main():
                url=SEARCH_URL, priority="low", tags="white_check_mark")
         state["last_heartbeat"] = today
 
-    state["listings"] = current
-    state["last_run"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    # Remember listings for a while after they vanish. Airbnb sometimes hides a
+    # listing for one check and shows it again, which shouldn't count as "new".
+    memory = {}
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=FORGET_AFTER_HOURS)
+    for lid, l in old.items():
+        if lid not in current:
+            seen = datetime.fromisoformat(l.get("last_seen", now_iso))
+            if seen > cutoff:
+                memory[lid] = l
+    for lid, l in current.items():
+        memory[lid] = {**l, "last_seen": now_iso}
+
+    state["listings"] = memory
+    state["last_run"] = now_iso
     save_state(state)
     print(f"OK: {len(current)} listings")
     return 0
