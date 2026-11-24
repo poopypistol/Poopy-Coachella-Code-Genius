@@ -2,7 +2,7 @@ name: Coachella Airbnb tracker
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # every 10 minutes (GitHub sometimes runs a few minutes late)
+    - cron: "*/10 * * * *"   # every 10 minutes (GitHub often runs these late)
   workflow_dispatch:          # adds a "Run workflow" button for testing
 
 permissions:
@@ -17,9 +17,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -33,4 +33,13 @@ jobs:
           git config user.name "tracker-bot"
           git config user.email "tracker-bot@users.noreply.github.com"
           git add state.json
-          git diff --cached --quiet || (git commit -m "update state" && git push)
+          git diff --cached --quiet && exit 0
+          git commit -m "update state"
+          # GitHub occasionally rejects a push; retry a few times, then give up
+          # quietly (the next run will save it) instead of failing the whole job.
+          for i in 1 2 3; do
+            git pull --rebase -X theirs --quiet && git push --quiet && exit 0
+            echo "Save attempt $i failed, retrying..."
+            sleep $((i * 5))
+          done
+          echo "::warning::Couldn't save state this run; the next run will try again."
